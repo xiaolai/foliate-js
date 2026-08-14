@@ -37,12 +37,14 @@ const simpleSearch = function* (strs, query, options = {}) {
             const startIndex = strIndex
             const startOffset = index - (sum - strs[strIndex].length)
             const end = index + needleLength
-            // stop at the last run; `end` is exclusive, so it can sit exactly
-            // at the end of the text, which no run extends past
-            while (sum <= end && strIndex < strs.length - 1)
-                sum += strs[++strIndex].length
-            const endIndex = strIndex
-            const endOffset = end - (sum - strs[strIndex].length)
+            // walk to the end on a copy of the cursor, as the next match can
+            // start before this one ends, and stop at the last run, as `end`
+            // is exclusive and can sit right at the end of the text
+            let endIndex = startIndex
+            let endSum = sum
+            while (endSum <= end && endIndex < strs.length - 1)
+                endSum += strs[++endIndex].length
+            const endOffset = end - (endSum - strs[endIndex].length)
             const range = { startIndex, startOffset, endIndex, endOffset }
             yield { range, excerpt: makeExcerpt(strs, range) }
         }

@@ -63,3 +63,17 @@ const SIMPLE = { granularity: 'grapheme', sensitivity: 'variant' }
         console.assert(a === b, `expected ${key} ${b}, got ${a}`)
     }
 }
+
+{
+    // overlapping matches: walking to the end of one match must not move the
+    // cursor used to find the start of the next, which begins before it ends
+    const results = Array.from(search(['a', 'a', 'a'], 'aa', SIMPLE))
+    console.assert(results.length === 2, `expected 2 matches, got ${results.length}`)
+    for (const [i, b] of [[0, [0, 0, 2, 0]], [1, [1, 0, 2, 1]]]) {
+        const { range, excerpt } = results[i] ?? {}
+        const a = range && [
+            range.startIndex, range.startOffset, range.endIndex, range.endOffset]
+        console.assert(a?.join() === b.join(), `expected range ${b}, got ${a}`)
+        console.assert(excerpt?.match === 'aa', `expected aa, got ${excerpt?.match}`)
+    }
+}
