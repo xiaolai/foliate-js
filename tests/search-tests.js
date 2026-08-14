@@ -126,3 +126,14 @@ const EXACT = { matchCase: true, matchDiacritics: true }
     for (const { range } of results ?? [])
         console.assert(range.toString() === 'aa', `expected aa, got ${range}`)
 }
+
+{
+    // omitting `granularity` must search by grapheme, as `search()` documents
+    // through its own default, rather than the word default applied downstream
+    const a = matches(['abcd'], 'bc', {}).length
+    console.assert(a === 1, `expected 1 match without options, got ${a}`)
+
+    // asking for whole words explicitly still matches whole words only
+    const b = matches(['abcd'], 'bc', { granularity: 'word' }).length
+    console.assert(b === 0, `expected 0 word matches, got ${b}`)
+}

@@ -107,10 +107,12 @@ const segmenterSearch = function* (strs, query, options = {}) {
 
 export const search = (strs, query, options) => {
     const { granularity = 'grapheme', sensitivity = 'base' } = options
+    // pass the defaults on, as they differ from the ones applied downstream
+    const opts = { ...options, granularity, sensitivity }
     if (!Intl?.Segmenter || granularity === 'grapheme'
     && (sensitivity === 'variant' || sensitivity === 'accent'))
-        return simpleSearch(strs, query, options)
-    return segmenterSearch(strs, query, options)
+        return simpleSearch(strs, query, opts)
+    return segmenterSearch(strs, query, opts)
 }
 
 export const searchMatcher = (textWalker, opts) => {
