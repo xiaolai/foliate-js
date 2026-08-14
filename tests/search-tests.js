@@ -36,3 +36,30 @@ const GRAPHEME = { granularity: 'grapheme', sensitivity: 'base' }
         console.assert(a === b, `expected ${key} ${b}, got ${a}`)
     }
 }
+
+// matching case or diacritics without whole words goes through `simpleSearch()`
+const SIMPLE = { granularity: 'grapheme', sensitivity: 'variant' }
+
+{
+    // a match reaching the very end of the text must not walk past the last
+    // run while looking for the one holding the (exclusive) end offset
+    for (const strs of [['abc'], ['ab', 'c'], ['a', 'b', 'c']]) {
+        let excerpt
+        try {
+            [excerpt] = matches(strs, 'abc', SIMPLE)
+        } catch (e) {
+            console.assert(false, `threw for ${JSON.stringify(strs)}: ${e}`)
+        }
+        const a = excerpt?.match
+        console.assert(a === 'abc', `expected abc for ${JSON.stringify(strs)}, got ${a}`)
+    }
+}
+
+{
+    // a match ending on a run boundary still keeps the following run as context
+    const [excerpt] = matches(['ab', 'cd'], 'ab', SIMPLE)
+    for (const [key, b] of [['match', 'ab'], ['post', 'cd']]) {
+        const a = excerpt?.[key]
+        console.assert(a === b, `expected ${key} ${b}, got ${a}`)
+    }
+}
