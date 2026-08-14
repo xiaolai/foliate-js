@@ -93,12 +93,37 @@ export class FixedLayout extends HTMLElement {
                 const doc = iframe.contentDocument
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
                 const { width, height } = getViewport(doc, this.defaultViewport)
-                resolve({
-                    element, iframe,
+                const frame = {
+                    element, iframe, index,
                     width: parseFloat(width),
                     height: parseFloat(height),
                     onZoom,
-                })
+                    overlayer: null,
+                }
+                // Ask the view for an overlayer, exactly as the paginator does.
+                // Without this, annotations never draw on a fixed-layout book —
+                // `view.addAnnotation` resolves the CFI and then has no surface
+                // to draw on.
+                this.dispatchEvent(new CustomEvent('create-overlayer', {
+                    detail: {
+                        doc, index,
+                        attach: overlayer => {
+                            frame.overlayer = overlayer
+                            // The wrapper is the positioning context; the
+                            // overlay is sized and transformed to match the
+                            // iframe in `#render`.
+                            element.style.position = 'relative'
+                            Object.assign(overlayer.element.style, {
+                                position: 'absolute',
+                                top: '0',
+                                left: '0',
+                                pointerEvents: 'none',
+                            })
+                            element.append(overlayer.element)
+                        },
+                    },
+                }))
+                resolve(frame)
             }, { once: true })
             iframe.src = src
         })
@@ -152,6 +177,25 @@ export class FixedLayout extends HTMLElement {
                 flexShrink: '0',
                 marginBlock: 'auto',
             })
+            // The overlay tracks the iframe exactly.
+            //
+            // It must take the SAME width, height and transform, because the
+            // Overlayer draws from `range.getClientRects()` measured inside the
+            // book document — coordinates a parent's CSS transform does not
+            // apply to. Matching the iframe is what puts a highlight on its
+            // words at every zoom. The two cases differ: a page with `onZoom`
+            // (a PDF) is re-rendered at scale and not transformed, while a
+            // fixed-layout EPUB keeps its natural size and is scaled by CSS.
+            if (frame.overlayer) {
+                Object.assign(frame.overlayer.element.style, {
+                    width: `${width * iframeScale}px`,
+                    height: `${height * iframeScale}px`,
+                    transform: onZoom ? 'none' : `scale(${scale})`,
+                    transformOrigin: 'top left',
+                    display: blank ? 'none' : 'block',
+                })
+                frame.overlayer.redraw()
+            }
             if (portrait && frame !== target) {
                 element.style.display = 'none'
             }
@@ -305,11 +349,22 @@ export class FixedLayout extends HTMLElement {
         const s = this.rtl ? this.#goRight() : this.#goLeft()
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
+    // Report the index and the overlayer, which this used to leave as a TODO.
+    //
+    // `view.addAnnotation` looks the section up by index and draws through the
+    // overlayer, so a contents entry without them is one annotations cannot
+    // reach. Built from the live frames rather than by querying the DOM for
+    // iframes, because only the frames carry the index and the overlayer — and
+    // blank fillers, which have neither, are dropped rather than reported as
+    // nameless documents.
     getContents() {
-        return Array.from(this.#root.querySelectorAll('iframe'), frame => ({
-            doc: frame.contentDocument,
-            // TODO: index, overlayer
-        }))
+        return [this.#center, this.#left, this.#right]
+            .filter(frame => frame?.iframe && !frame.blank)
+            .map(frame => ({
+                doc: frame.iframe.contentDocument,
+                index: frame.index,
+                overlayer: frame.overlayer,
+            }))
     }
     destroy() {
         this.#observer.unobserve(this)
