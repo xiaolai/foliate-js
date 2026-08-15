@@ -512,6 +512,25 @@ export class Paginator extends HTMLElement {
             grid-column: 1 / -1;
             grid-row: 1 / -1;
             overflow: auto;
+            /* Three hooks for the embedder, because this element is the
+             * scroll port and the shadow root is closed — there is no other
+             * way to reach it from outside.
+             *
+             * Every one defaults to the behaviour that was here before, so a
+             * host that sets none of them gets exactly the old rendering.
+             *
+             * The padding is what lets a host place the text column without
+             * narrowing the scroll port. Sizing the port instead puts its
+             * scrollbar wherever the column ends, which for a centred measure
+             * in a wide window is the middle of the page rather than the edge
+             * of the reading area. Padding moves the content and leaves the
+             * bar on the border box, where the platform draws it. */
+            padding-inline-start: var(--paper-scroll-pad-start, 0px);
+            padding-inline-end: var(--paper-scroll-pad-end, 0px);
+            /* scrollbar-width is NOT an inherited property, so a host cannot
+             * reach it through the closed root the way it can with a custom
+             * property. This indirection is the whole point. */
+            scrollbar-width: var(--paper-scrollbar-width, auto);
         }
         #header {
             grid-column: 3 / 4;
