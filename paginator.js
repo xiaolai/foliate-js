@@ -583,15 +583,6 @@ export class Paginator extends HTMLElement {
                 else setSelectionTo(this.#anchor, -1)
             }
         })
-        const checkPointerSelection = debounce((range, sel) => {
-            if (!sel.rangeCount) return
-            const selRange = sel.getRangeAt(0)
-            const backward = selectionIsBackward(sel)
-            if (backward && selRange.compareBoundaryPoints(Range.START_TO_START, range) < 0)
-                this.prev()
-            else if (!backward && selRange.compareBoundaryPoints(Range.END_TO_END, range) > 0)
-                this.next()
-        }, 700)
         this.addEventListener('load', ({ detail: { doc } }) => {
             let isPointerSelecting = false
             doc.addEventListener('pointerdown', () => isPointerSelecting = true)
@@ -601,13 +592,36 @@ export class Paginator extends HTMLElement {
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
             doc.addEventListener('selectionchange', () => {
                 if (this.scrolled) return
-                const range = this.#lastVisibleRange
-                if (!range) return
+                // Still a readiness check — nothing reads the range itself now.
+                if (!this.#lastVisibleRange) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
-                if (isPointerSelecting && sel.type === 'Range')
-                    checkPointerSelection(range, sel)
-                else if (isKeyboardSelecting) {
+                /* A pointer selection reaching the edge of the page no longer
+                 * turns it.
+                 *
+                 * Turning the page mid-drag was meant to let a selection run
+                 * across pages, but nothing repositioned the caret afterwards —
+                 * as the commit that removed the click-to-anchor behaviour put
+                 * it, "we do not move the caret when flipping through pages".
+                 * So the content slid a whole page under a stationary cursor
+                 * and WebKit extended the selection to wherever it now landed:
+                 * dragging one word past the end selected to the END of the
+                 * next page, and dragging back selected to the BEGINNING of the
+                 * previous one. It could cascade too, since `#afterScroll`
+                 * refreshes `#lastVisibleRange` and the debounce re-armed.
+                 *
+                 * Selection now simply stops at the page edge, which is what
+                 * Kindle and Apple Books do. A reader who wants a passage
+                 * spanning pages switches to scrolled flow, where none of this
+                 * runs — the early return above is the whole difference.
+                 *
+                 * The branch is kept rather than deleted because it still has
+                 * to EXCLUDE a pointer Range selection from the keyboard case
+                 * below; falling through would scroll the view to the anchor
+                 * mid-drag. */
+                if (isPointerSelecting && sel.type === 'Range') {
+                    // nothing
+                } else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
                     const backward = selectionIsBackward(sel)
                     if (!backward) selRange.collapse()
