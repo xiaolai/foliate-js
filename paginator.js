@@ -583,31 +583,119 @@ export class Paginator extends HTMLElement {
                 else setSelectionTo(this.#anchor, -1)
             }
         })
-        const checkPointerSelection = debounce((range, sel) => {
-            if (!sel.rangeCount) return
-            const selRange = sel.getRangeAt(0)
-            const backward = selectionIsBackward(sel)
-            if (backward && selRange.compareBoundaryPoints(Range.START_TO_START, range) < 0)
-                this.prev()
-            else if (!backward && selRange.compareBoundaryPoints(Range.END_TO_END, range) > 0)
-                this.next()
-        }, 700)
         this.addEventListener('load', ({ detail: { doc } }) => {
             let isPointerSelecting = false
             doc.addEventListener('pointerdown', () => isPointerSelecting = true)
             doc.addEventListener('pointerup', () => isPointerSelecting = false)
+
+            /* The visible page, as a BOX in this document's own coordinates.
+             *
+             * Geometry rather than a range, because both range-based attempts
+             * failed here and this predicate was verified in the running app.
+             * `#getVisibleRange()` reaches past the page — measured: with the
+             * page box spanning 5280…5940, a focus at x=5982 sat outside it
+             * while the range-based clamp still held the selection, giving 1602
+             * characters from a drag of a few dozen pixels.
+             *
+             * Why so few pixels cost so much text: the next page is the next
+             * COLUMN, laid out to the right in the same flow. At the same
+             * vertical position it is a whole column further along, so a focus
+             * 42px past the edge is roughly 1600 characters past the edge.
+             *
+             * The box is whichever ancestor clips the iframe — the element that
+             * decides what the reader can see — expressed relative to the
+             * iframe so it can be compared with rects measured inside it. */
+            const pageBox = () => {
+                const iframe = doc.defaultView?.frameElement
+                if (!iframe) return null
+                const ib = iframe.getBoundingClientRect()
+                let el = iframe.parentElement
+                while (el) {
+                    const b = el.getBoundingClientRect()
+                    if (getComputedStyle(el).overflow === 'hidden'
+                        && b.width > 100 && b.width < ib.width)
+                        return {
+                            left: b.left - ib.left, right: b.right - ib.left,
+                            top: b.top - ib.top, bottom: b.bottom - ib.top,
+                        }
+                    el = el.parentElement ?? el.getRootNode()?.host ?? null
+                }
+                return null
+            }
+
+            /** The last caret position still on the page, on the side overrun. */
+            const edgeCaret = (box, pastRight) => {
+                const x = pastRight ? box.right - 4 : box.left + 4
+                // Probe inward: the very corner is usually margin, not text.
+                for (let i = 0; i < 24; i++) {
+                    const y = pastRight ? box.bottom - 6 - i * 8 : box.top + 6 + i * 8
+                    if (y < box.top || y > box.bottom) break
+                    const caret = doc.caretRangeFromPoint?.(x, y)
+                    if (caret) return caret
+                }
+                return null
+            }
             let isKeyboardSelecting = false
             doc.addEventListener('keydown', () => isKeyboardSelecting = true)
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
             doc.addEventListener('selectionchange', () => {
                 if (this.scrolled) return
-                const range = this.#lastVisibleRange
-                if (!range) return
+                if (!this.#lastVisibleRange) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
-                if (isPointerSelecting && sel.type === 'Range')
-                    checkPointerSelection(range, sel)
-                else if (isKeyboardSelecting) {
+                /* A pointer selection reaching the edge of the page no longer
+                 * turns it.
+                 *
+                 * Turning the page mid-drag was meant to let a selection run
+                 * across pages, but nothing repositioned the caret afterwards —
+                 * as the commit that removed the click-to-anchor behaviour put
+                 * it, "we do not move the caret when flipping through pages".
+                 * So the content slid a whole page under a stationary cursor
+                 * and WebKit extended the selection to wherever it now landed:
+                 * dragging one word past the end selected to the END of the
+                 * next page, and dragging back selected to the BEGINNING of the
+                 * previous one. It could cascade too, since `#afterScroll`
+                 * refreshes `#lastVisibleRange` and the debounce re-armed.
+                 *
+                 * Selection now simply stops at the page edge, which is what
+                 * Kindle and Apple Books do. A reader who wants a passage
+                 * spanning pages switches to scrolled flow, where none of this
+                 * runs — the early return above is the whole difference.
+                 *
+                 * The branch is kept rather than deleted because it still has
+                 * to EXCLUDE a pointer Range selection from the keyboard case
+                 * below; falling through would scroll the view to the anchor
+                 * mid-drag. */
+                if (isPointerSelecting && sel.type === 'Range') {
+                    /* Clamp the focus to the visible page, by GEOMETRY.
+                     *
+                     * Stopping the page turn is not enough on its own, because
+                     * the turn was never what carried the selection forward:
+                     * the next page is the next column, laid out to the right in
+                     * the same flow, so a pointer past the column edge maps
+                     * straight into it and WebKit selects through.
+                     *
+                     * Two range-based versions of this failed before it. Both
+                     * clamped against `#getVisibleRange()`, which reaches past
+                     * the page — measured in the running app, a focus 42px
+                     * outside a 5280…5940 page box was still held by the clamp,
+                     * at 1602 characters. So the test is now whether the focus's
+                     * own rect is inside the box the reader can see, which is
+                     * the predicate that was verified rather than assumed.
+                     *
+                     * `extend` moves the focus and leaves the anchor. It cannot
+                     * loop: the clamped focus is inside the box, so the
+                     * `selectionchange` this causes takes the early return. */
+                    const box = pageBox()
+                    if (!box || !sel.focusNode) return
+                    const at = doc.createRange()
+                    at.setStart(sel.focusNode, sel.focusOffset)
+                    at.collapse(true)
+                    const f = at.getBoundingClientRect()
+                    if (f.x >= box.left - 2 && f.x <= box.right + 2) return
+                    const caret = edgeCaret(box, f.x > box.right)
+                    if (caret) sel.extend(caret.startContainer, caret.startOffset)
+                } else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
                     const backward = selectionIsBackward(sel)
                     if (!backward) selRange.collapse()
