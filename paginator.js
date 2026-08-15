@@ -585,8 +585,26 @@ export class Paginator extends HTMLElement {
         })
         this.addEventListener('load', ({ detail: { doc } }) => {
             let isPointerSelecting = false
-            doc.addEventListener('pointerdown', () => isPointerSelecting = true)
-            doc.addEventListener('pointerup', () => isPointerSelecting = false)
+            /* The page the drag started on, measured when it starts.
+             *
+             * NOT `#lastVisibleRange`, which is only refreshed in
+             * `#afterScroll` — so after a section loads and then reflows
+             * (webfonts arriving, a side pane opening) it describes text that
+             * is no longer where it says. Clamping against a stale range let a
+             * selection run into the next page, which is the bug this exists
+             * to stop. Recomputed once per gesture rather than per
+             * `selectionchange`, because `#getVisibleRange` walks the document
+             * and a drag emits a great many of those. Safe to hold for the
+             * whole gesture now that a selection can no longer turn the page. */
+            let visibleAtDragStart = null
+            doc.addEventListener('pointerdown', () => {
+                isPointerSelecting = true
+                visibleAtDragStart = this.scrolled ? null : this.#getVisibleRange()
+            })
+            doc.addEventListener('pointerup', () => {
+                isPointerSelecting = false
+                visibleAtDragStart = null
+            })
             let isKeyboardSelecting = false
             doc.addEventListener('keydown', () => isKeyboardSelecting = true)
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
@@ -635,7 +653,8 @@ export class Paginator extends HTMLElement {
                      * actually see. It cannot loop: once clamped the comparison
                      * is 0 rather than greater, so the `selectionchange` this
                      * causes does nothing. */
-                    const visible = this.#lastVisibleRange
+                    const visible = visibleAtDragStart
+                    if (!visible) return
                     const selRange = sel.getRangeAt(0)
                     if (selectionIsBackward(sel)) {
                         if (selRange.compareBoundaryPoints(Range.START_TO_START, visible) < 0)
