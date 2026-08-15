@@ -592,7 +592,6 @@ export class Paginator extends HTMLElement {
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
             doc.addEventListener('selectionchange', () => {
                 if (this.scrolled) return
-                // Still a readiness check — nothing reads the range itself now.
                 if (!this.#lastVisibleRange) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
@@ -620,7 +619,29 @@ export class Paginator extends HTMLElement {
                  * below; falling through would scroll the view to the anchor
                  * mid-drag. */
                 if (isPointerSelecting && sel.type === 'Range') {
-                    // nothing
+                    /* Clamp the focus to the visible page.
+                     *
+                     * Stopping the page turn is not enough on its own, because
+                     * the turn was never what carried the selection forward.
+                     * Pagination here is CSS columns: the next page is laid out
+                     * to the RIGHT in the same continuous flow, so a pointer
+                     * dragged past the end of the column maps straight into the
+                     * next page's text and WebKit selects through to it. A drag
+                     * fourteen pixels past the last word took 7 characters to
+                     * 722, with no relocation at all.
+                     *
+                     * `extend` moves the focus and leaves the anchor, so this
+                     * pins the growing end to the edge of what the reader can
+                     * actually see. It cannot loop: once clamped the comparison
+                     * is 0 rather than greater, so the `selectionchange` this
+                     * causes does nothing. */
+                    const visible = this.#lastVisibleRange
+                    const selRange = sel.getRangeAt(0)
+                    if (selectionIsBackward(sel)) {
+                        if (selRange.compareBoundaryPoints(Range.START_TO_START, visible) < 0)
+                            sel.extend(visible.startContainer, visible.startOffset)
+                    } else if (selRange.compareBoundaryPoints(Range.END_TO_END, visible) > 0)
+                        sel.extend(visible.endContainer, visible.endOffset)
                 } else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
                     const backward = selectionIsBackward(sel)
