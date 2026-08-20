@@ -16,9 +16,21 @@ const debounce = (f, wait, immediate) => {
 
 const lerp = (min, max, x) => x * (max - min) + min
 const easeOutQuad = x => 1 - (1 - x) * (1 - x)
-const animate = (a, b, duration, ease, render) => new Promise(resolve => {
+// `onSkip` is handed a function that renders the END VALUE at once and settles
+// the promise, so an interrupted animation leaves the animated value exactly
+// where a completed one would — never half way. That is what lets a second page
+// turn take over from the first without the renderer having to distinguish an
+// interrupted scroll from a completed one.
+//
+// It guarantees the VALUE and nothing else. Whatever a caller does in its
+// continuation still runs a microtask later, so a caller whose bookkeeping must
+// not observe a newer position has to do that work inside its skip handle
+// rather than in a `then` — which is what `#scrollTo` does, and why.
+const animate = (a, b, duration, ease, render, onSkip) => new Promise(resolve => {
     let start
+    let skipped = false
     const step = now => {
+        if (skipped) return
         if (document.hidden) {
             render(lerp(a, b, 1))
             return resolve()
@@ -29,6 +41,13 @@ const animate = (a, b, duration, ease, render) => new Promise(resolve => {
         if (fraction < 1) requestAnimationFrame(step)
         else resolve()
     }
+    onSkip?.(() => {
+        if (skipped) return
+        skipped = true
+        render(lerp(a, b, 1))
+        resolve()
+    })
+    if (skipped) return
     if (document.hidden) {
         render(lerp(a, b, 1))
         return resolve()
@@ -441,6 +460,19 @@ export class Paginator extends HTMLElement {
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
+    // Lands the running scroll animation on its target AND settles it, or null
+    // when none is running. A turn asked for mid-animation calls it rather than
+    // being discarded — see `#turnPage`.
+    #skipScroll = null
+    // Bumped whenever an animated scroll supersedes whatever came before, so a
+    // continuation waiting on the earlier one can tell that its view of where
+    // the reader is has expired — see `snap`.
+    #navSeq = 0
+    // Turns asked for while one was still running, and the direction of the
+    // most recent. Coalesced rather than counted: a reader holding the arrow
+    // key wants the pages to keep coming while the key is down, not a backlog
+    // that carries on turning after they let go.
+    #queuedTurn = null
     #styles
     #styleMap = new WeakMap()
     #mediaQuery = matchMedia('(prefers-color-scheme: dark)')
@@ -919,7 +951,17 @@ export class Paginator extends HTMLElement {
             Math.max(min, Math.min(max, (start + end) / 2
                 + (isNaN(d) ? 0 : d))) / size)
 
-        this.#scrollToPage(page, 'snap').then(() => {
+        const scrolling = this.#scrollToPage(page, 'snap')
+        // Read AFTER the call, so this is the sequence the snap's own animation
+        // was given. If anything starts another animated scroll before it
+        // finishes, the boundary this continuation is about to act on is a
+        // boundary the reader has already navigated away from — and `#goTo`
+        // loads a section, so acting on it races the load that superseded it.
+        // `#locked` cannot cover this: `snap` never takes it, and it reaches the
+        // private `#goTo` directly.
+        const seq = this.#navSeq
+        scrolling.then(() => {
+            if (this.#navSeq !== seq) return
             const dir = page <= 0 ? -1 : page >= pages - 1 ? 1 : null
             if (dir) return this.#goTo({
                 index: this.#adjacentIndex(dir),
@@ -1005,13 +1047,59 @@ export class Paginator extends HTMLElement {
         }
         // FIXME: vertical-rl only, not -lr
         if (this.scrolled && this.#vertical) offset = -offset
-        if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) return animate(
-            element[scrollProp], offset, 300, easeOutQuad,
-            x => element[scrollProp] = x,
-        ).then(() => {
-            this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-            this.#afterScroll(reason)
-        })
+        if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) {
+            // Whatever was still easing lands now, so this one starts from a
+            // settled position rather than racing it: two `requestAnimationFrame`
+            // loops writing the same `scrollLeft` interleave, and the reader sees
+            // the page stutter between two destinations.
+            //
+            // The handle SETTLES the superseded scroll as well as landing it, and
+            // does both synchronously. Leaving the settle to its `then` opens a
+            // window one microtask wide in which the replacement has already
+            // moved the container — `animate` renders its end value inline when
+            // `document.hidden`, which is every occluded window — so the older
+            // finalizer would write its own offset into `#scrollBounds` while
+            // reading `atStart`, `atEnd` and the visible range off the NEWER
+            // position, and report that mixture as a relocation.
+            this.#skipScroll?.()
+            // Skipping may have landed exactly here — a turn taken during a snap
+            // towards the same page. Animating `a` to `a` is 300ms of holding
+            // `#locked` for no movement, which is the dropped-input bug this
+            // change exists to remove, reappearing in a corner of it.
+            if (element[scrollProp] === offset) {
+                this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                this.#afterScroll(reason)
+                return
+            }
+            // Anything already waiting on a scroll that has now been superseded
+            // must not act on it — see `snap`, which decides whether to cross a
+            // section boundary in its continuation.
+            this.#navSeq++
+            let settled = false
+            // `mine` is not ceremony. Settling clears the handle, and the `then`
+            // below runs a microtask LATER — by which time this method may
+            // already have installed the next animation's. Clearing
+            // unconditionally would throw that one away, leaving an animation
+            // running with nothing able to skip it, so the turn after an
+            // interrupted one would go back to waiting out the full ease, and
+            // only sometimes, which is the worst way for this to fail.
+            let mine
+            const settle = () => {
+                if (settled) return
+                settled = true
+                if (this.#skipScroll === mine) this.#skipScroll = null
+                this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                this.#afterScroll(reason)
+            }
+            return animate(
+                element[scrollProp], offset, 300, easeOutQuad,
+                x => element[scrollProp] = x,
+                skip => this.#skipScroll = mine = () => {
+                    skip()
+                    settle()
+                },
+            ).then(settle)
+        }
         else {
             element[scrollProp] = offset
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
@@ -1165,16 +1253,48 @@ export class Paginator extends HTMLElement {
             if (this.sections[index]?.linear !== 'no') return index
     }
     async #turnPage(dir, distance) {
-        if (this.#locked) return
+        // A turn asked for while one is still running is REMEMBERED, not
+        // dropped. The lock is held for as long as the turn takes, and with
+        // `animated` set that is the whole 300ms ease — so a reader holding the
+        // arrow key, which repeats about every 33ms, was getting one page and
+        // nine discarded keystrokes. Measured at 15 presses over half a second:
+        // two pages turned.
+        //
+        // Skipping the running animation is what makes the queue drain at the
+        // speed the reader is actually asking, instead of at one page per
+        // animation: each new turn lands the previous one and starts its own, so
+        // the ease is only ever seen in full when nothing is waiting behind it.
+        if (this.#locked) {
+            this.#queuedTurn = { dir, distance }
+            this.#skipScroll?.()
+            return
+        }
         this.#locked = true
-        const prev = dir === -1
-        const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
-        if (shouldGo) await this.#goTo({
-            index: this.#adjacentIndex(dir),
-            anchor: prev ? () => 1 : () => 0,
-        })
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
-        this.#locked = false
+        try {
+            for (;;) {
+                // Cleared BEFORE the turn, not after: anything that arrives
+                // while this one runs is a request for another turn, and
+                // clearing afterwards would swallow it.
+                this.#queuedTurn = null
+                const prev = dir === -1
+                const shouldGo = await (prev
+                    ? this.#scrollPrev(distance) : this.#scrollNext(distance))
+                if (shouldGo) await this.#goTo({
+                    index: this.#adjacentIndex(dir),
+                    anchor: prev ? () => 1 : () => 0,
+                })
+                if (shouldGo || !this.hasAttribute('animated')) await wait(100)
+                const queued = this.#queuedTurn
+                if (!queued) break
+                // ONE turn per waiting batch, however many arrived. Counting
+                // them instead would keep turning pages after the key came up,
+                // which is the failure the drop was hiding.
+                ;({ dir, distance } = queued)
+            }
+        } finally {
+            this.#locked = false
+            this.#queuedTurn = null
+        }
     }
     prev(distance) {
         return this.#turnPage(-1, distance)
