@@ -1296,6 +1296,58 @@ export class Paginator extends HTMLElement {
             this.#queuedTurn = null
         }
     }
+    /**
+     * True when turning one page in `dir` would land on a guard page — that is,
+     * when the turn crosses into an adjacent section rather than staying within
+     * this one.
+     *
+     * Public because THE DECISION HAS TO BE MADE BEFORE ANY ANIMATION STARTS. A
+     * section change is a document load, and an embedder animating the turn
+     * itself cannot put a load inside its animation: a view transition cuts its
+     * update callback off at four seconds on every engine tested, and a load
+     * measured 4471ms. So the embedder asks this first and animates only when
+     * the answer is no.
+     *
+     * `atStart`/`atEnd` answer a different question — the ends of the BOOK,
+     * where `#scrollPrev`/`#scrollNext` decline to move at all — so they cannot
+     * stand in for this. Scrolled flow has no pages to cross between.
+     */
+    willCrossSection(dir) {
+        if (!this.#view || this.scrolled) return false
+        if (dir < 0) return this.atStart ? false : this.page - 1 <= 0
+        return this.atEnd ? false : this.page + 1 >= this.pages - 1
+    }
+    /**
+     * Turn one page with no easing and no pacing delay, for an embedder that is
+     * animating the turn itself.
+     *
+     * Three things it does NOT do, each deliberate:
+     *
+     *   it does not take `#locked`, because the embedder owns the turn's
+     *     duration and a lock held here would fight whatever it is running;
+     *
+     *   it does not `wait(100)`. That pacing exists so a held key does not fly
+     *     through the book when nothing is animating — and something IS
+     *     animating here. Inside a view transition it is 100ms of dead time
+     *     before the animation can start, which is the whole difference between
+     *     a turn that feels instant and one that does not;
+     *
+     *   it does not `#goTo`. See `willCrossSection`.
+     *
+     * Returns `true` when a section change is still required, so a caller that
+     * reached here anyway can finish the job outside its own animation rather
+     * than leaving the reader on a blank guard page.
+     *
+     * Easing is already gated on the `animated` attribute over in `#scrollTo`,
+     * so a caller wanting an instant turn removes that attribute. This method
+     * does not touch it: whether the OTHER paths animate is not its business,
+     * and toggling a shared attribute from here would surprise them.
+     */
+    async turnInstant(dir) {
+        const shouldGo = await (dir < 0
+            ? this.#scrollPrev() : this.#scrollNext())
+        return shouldGo === true
+    }
     prev(distance) {
         return this.#turnPage(-1, distance)
     }
