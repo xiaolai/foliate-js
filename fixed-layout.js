@@ -33,6 +33,8 @@ export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom']
     #root = this.attachShadow({ mode: 'closed' })
     #observer = new ResizeObserver(() => this.#render())
+    // The current spread's paints, settled. See `whenPainted`.
+    #painting = null
     #spreads
     #index = -1
     defaultViewport
@@ -157,10 +159,23 @@ export class FixedLayout extends HTMLElement {
                             right.height ?? blankHeight)))
             ) || 1
 
+        const painting = []
         const transform = frame => {
             let { element, iframe, width, height, blank, onZoom } = frame
             if (!iframe) return
-            if (onZoom) onZoom({ doc: frame.iframe.contentDocument, scale })
+            /* WHATEVER `onZoom` RETURNS IS COLLECTED, because for a PDF it is a
+             * promise for the page actually being drawn.
+             *
+             * An embedder cannot otherwise tell a page that has LOADED from one
+             * that is VISIBLE. The iframe's `load` event — which is all
+             * `#createFrame` waits for — fires for a document whose canvas is
+             * still empty, and the bitmap arrives some time later. Anything
+             * that measures or captures the spread in between gets a blank
+             * page and no indication that it is early. */
+            if (onZoom) {
+                const painted = onZoom({ doc: frame.iframe.contentDocument, scale })
+                if (painted?.then) painting.push(painted)
+            }
             const iframeScale = onZoom ? scale : 1
             Object.assign(iframe.style, {
                 width: `${width * iframeScale}px`,
@@ -206,6 +221,27 @@ export class FixedLayout extends HTMLElement {
             transform(left)
             transform(right)
         }
+        // Settled, never rejected: a failed paint is still a finished one, and
+        // a caller awaiting the spread must not inherit its error.
+        this.#painting = painting.length
+            ? Promise.allSettled(painting).then(() => undefined)
+            : Promise.resolve()
+    }
+
+    /**
+     * Resolves when the spread on screen has finished drawing itself.
+     *
+     * `goTo`/`next`/`prev` resolve when the spread's documents have LOADED,
+     * which for a renderer of images is not the same thing — see the note in
+     * `#render`. An embedder that needs the pixels, rather than the DOM, awaits
+     * this after navigating.
+     *
+     * Resolves immediately when nothing reported a paint, which is every
+     * fixed-layout EPUB: those draw with the document and have nothing to wait
+     * for. It never rejects.
+     */
+    whenPainted() {
+        return this.#painting ?? Promise.resolve()
     }
     async #showSpread({ left, right, center, side }) {
         this.#root.replaceChildren()
